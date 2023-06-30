@@ -16,12 +16,15 @@
 set -e
 set -x
 
-virtualenv -p python3.7 .
-source ./bin/activate
+virtualenv -p python3.9 .
+source "$(dirname `which virtualenv`)/activate"
 
 pip install -r seq2act/data_generation/requirements.txt
 pip install bs4
 
+# --input_warc_dir=${PWD}"/seq2act/data/android_howto/warc" \
 python -m seq2act.data_generation.crawl_instructions \
 --input_warc_dir=${PWD}"/seq2act/data/android_howto/warc" \
 --output_instruction_json=${PWD}"/seq2act/data/android_howto/crawled_instructions.json"
+
+# python -m seq2act.data_generation.crawl_instructions --input_warc_dir=seq2act/data/android_howto/warc --output_instruction_json=seq2act/data/android_howto/crawled_instructions.json

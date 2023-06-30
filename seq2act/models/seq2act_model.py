@@ -44,7 +44,6 @@ def compute_logits(features, hparams, mode,
       features, references, hparams)
   return action_logits, obj_logits, consumed_logits, references
 
-
 def compute_loss(loss_dict, features, action_logits, obj_logits,
                  consumed_logits, references, hparams):
   """Computes the loss."""
@@ -53,7 +52,7 @@ def compute_loss(loss_dict, features, action_logits, obj_logits,
   grounding_loss = seq2act_grounding.compute_losses(
       loss_dict, features, action_logits, obj_logits, consumed_logits)
   global_step = tf.train.get_global_step()
-  if global_step:
+  if global_step is not None:
     total_loss += tf.cond(
         tf.greater(global_step, hparams.reference_warmup_steps),
         lambda: grounding_loss,

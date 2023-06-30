@@ -16,10 +16,10 @@
 set -e
 set -x
 
-virtualenv -p python3.7 .
-source ./bin/activate
+virtualenv -p python3.9 .
+source "$(dirname `which virtualenv`)/activate"
 
-pip install -r seq2act/data_generation/requirements.txt
+# pip install -r seq2act/data_generation/requirements.txt
 
 mkdir -p ${PWD}"/seq2act/data/android_howto/tfexample/"
 

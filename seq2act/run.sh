@@ -16,11 +16,11 @@
 set -e
 set -x
 
-virtualenv -p python3.7 .
-source ./bin/activate
+# virtualenv -p python3.9 .
+# source "$(dirname `which virtualenv`)/activate"
 
-pip install tensorflow
-pip install -r seq2act/requirements.txt
+# pip install tensorflow
+# pip install -r seq2act/requirements.txt
 python -m seq2act.bin.setup_test --train_file_list "seq2act/data/android_howto/tfexample/*.tfrecord,seq2act/data/rico_sca/tfexample/*.tfrecord" \
                                  --train_source_list "android_howto,rico_sca" \
                                  --train_batch_sizes "2,2" \
