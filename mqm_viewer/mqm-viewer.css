@@ -34,6 +34,9 @@
   opacity: 100%;
   color: black;
 }
+.mqm-bottomed-tr {
+  border-bottom: 1px solid dimgray;
+}
 .mqm-ci {
   color: gray;
   font-size: x-small
@@ -42,10 +45,27 @@
   background: rgba(127, 0, 255, 0.7);
   cursor: crosshair;
 }
+.mqm-dotted-bottomed-tr {
+  border-bottom: 1px dashed darkgray;
+}
 #mqm-errors {
   color: red;
   max-height: 100px;
   overflow-y: auto;
+}
+.mqm-file-menu tr {
+  border: 1px solid gray;
+  padding: 4px;
+}
+.mqm-file-menu-entry {
+  cursor: pointer;
+}
+.mqm-file-menu-entry:hover {
+  background-color: lightgreen;
+  border: 1px solid blue;
+}
+.mqm-file-menu-option {
+  text-align: right;
 }
 .mqm-filters * {
   line-height: 1.5;
@@ -57,14 +77,6 @@
   margin: 8px;
   position: relative;
   width: 90%;
-}
-.mqm-header-right {
-  bottom: 0;
-  color: blue;
-  font-style: italic;
-  position: absolute;
-  right: 0;
-  vertical-align: baseline;
 }
 .mqm-help-icon {
   color: blue;
@@ -81,6 +93,14 @@
 .mqm-major {
   background: rgba(255, 192, 203, 0.7);
   cursor: crosshair;
+}
+.mqm-menu td {
+  padding: 6px 16px 0 0;
+  vertical-align: text-top;
+}
+.mqm-menu-entry summary {
+  cursor: pointer;
+  color: blue;
 }
 .mqm-minor {
   background: rgba(251, 236, 93, 0.7);
@@ -105,6 +125,9 @@
 .mqm-out-of-order {
   background: lavender;
 }
+.mqm-ref-row {
+  background-color: #e9ffdb;
+}
 #mqm-reset-settings {
   cursor: pointer;
 }
@@ -119,6 +142,9 @@
   position: sticky;
   top: 0;
 }
+.mqm-row-metadata {
+  white-space: break-spaces;
+}
 #mqm-score-heading {
   font-weight: bold;
   max-width: 10ch;
@@ -130,18 +156,13 @@
   font-size: large;
   font-weight: bold;
 }
+.mqm-seg-score {
+  font-size: small;
+}
 .mqm-select {
   margin: 4px 0;
-  max-width: 100px;
+  max-width: 80px;
   min-width: 50px;
-}
-.mqm-settings {
-  margin: 6px 0 4px;
-  padding: 0 0 10px 0;
-}
-.mqm-settings summary {
-  cursor: pointer;
-  color: blue;
 }
 .mqm-settings-editable {
   border-bottom: 1px solid blue;
@@ -154,11 +175,20 @@
 .mqm-settings-row {
   margin: 6px 0;
 }
+.mqm-sigtests {
+  margin: 8px;
+}
+.mqm-sigtest-significant {
+  font-weight: bold;
+}
 .mqm-stats-slice {
   background-color: #F0F0F0;
 }
 .mqm-stats-weighted {
   background-color: #F8F8F8;
+}
+.mqm-subheading {
+  padding: 6px 0 0 4px;
 }
 .mqm-sys-v-sys {
   margin: 8px;
@@ -200,22 +230,22 @@
   border-bottom: 1px solid gray;
 }
 #mqm-th-doc {
-  width: 10%;
+  width: 9%;
 }
 #mqm-th-doc-seg {
-  width: 3%;
+  width: 5%;
 }
 #mqm-th-system {
-  width: 10%;
+  width: 9%;
 }
 #mqm-th-source {
-  width: 30%;
+  width: 29%;
 }
 #mqm-th-target {
-  width: 30%;
+  width: 29%;
 }
 #mqm-th-rating {
-  width: 17%;
+  width: 19%;
 }
 .mqm-timestamp {
   font-size: x-small;
@@ -234,6 +264,9 @@
   background: rgba(245, 245, 220, 0.7);
   cursor: crosshair;
 }
+.mqm-val {
+  word-break: break-all;
+}
 .mqm-val:hover {
   cursor: pointer;
 }
@@ -243,4 +276,7 @@
 #mqm-viewing-constraints {
   cursor: pointer;
   font-style: italic;
+}
+.mqm-warning {
+  color: red;
 }

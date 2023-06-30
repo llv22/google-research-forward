@@ -142,33 +142,48 @@ class AntheaDocSys {
    * please prepend a space to it in the file.
    *
    * The first line should contain a JSON object with the source and the target
-   * language codes. For instance:
-   *   {"source-language": "en", "target-langauge": "fr"}
+   * language codes, and potentially other parameters. For instance:
+   *   {"source_language": "en", "target_langauge": "fr"}
    *
    * @param {string} projectFileContents TSV-formatted text data.
    * @return {!Array<!AntheaDocSys>} An array of parsed AntheaDocSys objects.
+   *   The parsed parameters from the first line as included as the
+   *   "parameters" property of this array.
    */
   static parseProjectFileContents(projectFileContents) {
     const parsed = [];
     const lines = projectFileContents.split('\n');
-    let metadata = {};
+    let parameters = {};
     let parsingErr = null;
     try {
-      metadata = JSON.parse(lines[0]);
+      parameters = JSON.parse(lines[0]);
     } catch (err) {
-      metadata = {};
+      parameters = {};
       parsingErr = err;
     }
-    if (!metadata['source-language'] || !metadata['target-language']) {
+    /**
+     * Convert hyphenated (legacy) to underscored property names.
+     */
+    const keys = Object.keys(parameters);
+    for (let key of keys) {
+      const underscored_key = key.replace(/-/g, '_');
+      if (key == underscored_key) {
+        continue;
+      }
+      parameters[underscored_key] = parameters[key];
+      delete parameters[key];
+    }
+    if (!parameters['source_language'] || !parameters['target_language']) {
       throw 'The first line must be a JSON object and contain source and ' +
-          'target language codes with keys "source-language" and ' +
-          '"target-language".' +
+          'target language codes with keys "source_language" and ' +
+          '"target_language".' +
           (parsingErr ? (' Parsing error: ' + parsingErr.toString() +
                          ' — Stack: ' + parsingErr.stack) : '');
     }
-    const srcLang = metadata['source-language'];
-    const tgtLang = metadata['target-language'];
+    const srcLang = parameters['source_language'];
+    const tgtLang = parameters['target_language'];
     let docsys = new AntheaDocSys();
+    const spacesNormalizer = (s) => s.replace(/[\s]+/g, ' ');
     for (let line of lines.slice(1)) {
       if (line.startsWith('#')) {
         continue;
@@ -186,16 +201,12 @@ class AntheaDocSys {
         console.log('Skipping ill-formed text line: [' + line + ']');
         continue;
       }
-      const srcSegment = parts[0].trim();
-      const tgtSegment = parts[1].trim();
+      /** Note that we do not trim() srcSegment/tgtSegment. */
+      const srcSegment = spacesNormalizer(parts[0]);
+      const tgtSegment = spacesNormalizer(parts[1]);
       const doc = parts[2].trim() + ':' + srcLang + ':' + tgtLang;
       const sys = parts[3].trim();
       const annotation = parts.length > 4 ? parts[4].trim() : '';
-      if ((!srcSegment || !tgtSegment) && (srcSegment || tgtSegment)) {
-        console.log('Skipping text line: only one of src/tgt is nonempty: [' +
-                    line + ']');
-        continue;
-      }
       if (!doc || !sys) {
         console.log('Skipping text line with empty doc/sys: [' + line + ']');
         continue;
@@ -245,9 +256,8 @@ class AntheaDocSys {
     if (parsed.length == 0) {
       throw 'Did not find any properly formatted text lines in file';
     }
-    // Add language codes to the docsys array.
-    parsed.srcLang = srcLang;
-    parsed.tgtLang = tgtLang;
+    // Add project parameters as a property of the parsed array.
+    parsed.parameters = parameters;
     return parsed;
   }
 }
@@ -315,6 +325,24 @@ class AntheaCursor {
   }
 
   /**
+   * Returns true if the passed segment has been full seen.
+   * @param {number} seg
+   * @return {boolean}
+   */
+  segFullySeen(seg) {
+    if (this.numSentsShown[1][seg] < this.numSents[1][seg]) {
+      return false;
+    }
+    if (this.tgtOnly) {
+      return true;
+    }
+    if (this.numSentsShown[0][seg] < this.numSents[0][seg]) {
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Returns true if we are at the end of a doc.
    * @return {boolean}
    */
@@ -324,6 +352,9 @@ class AntheaCursor {
       return false;
     }
     if (this.sent + 1 != this.numSents[endSide][this.seg]) {
+      return false;
+    }
+    if (!this.segFullySeen(this.seg)) {
       return false;
     }
     if (this.seg != this.segments.length - 1 &&
@@ -338,12 +369,10 @@ class AntheaCursor {
    * @return {boolean}
    */
   seenDocEnd() {
-    const endSide = (this.tgtFirst && !this.tgtOnly) ? 0 : 1;
     const endSeg = (this.doc + 1 < this.docSegStarts.length) ?
                    this.docSegStarts[this.doc + 1] - 1 :
                    this.segments.length - 1;
-    const endSent = this.numSents[endSide][endSeg] - 1;
-    return this.numSentsShown[endSide][endSeg] > endSent;
+    return this.segFullySeen(endSeg);
   }
 
   /**
@@ -355,21 +384,34 @@ class AntheaCursor {
       return;
     }
     if (this.sent + 1 < this.numSents[this.side][this.seg]) {
+      /** Goto: next sentence, same side. */
       this.goto(this.seg, this.side, this.sent + 1);
     } else {
       if (this.tgtFirst) {
         if (this.side == 1) {
-          this.goto(this.seg, 0, 0);
+          /** Goto: last-read sentence, src side. */
+          const srcSent = Math.max(0, this.numSentsShown[0][this.seg] - 1);
+          this.goto(this.seg, 0, srcSent);
         } else {
           if (this.seg + 1 < this.segments.length) {
+            /** Goto: start sentence of next seg, tgt side. */
             this.goto(this.seg + 1, 1, 0);
           }
         }
       } else {
         if (this.side == 0) {
-          this.goto(this.seg, 1, 0);
+          /** Goto: last-read sentence, tgt side. */
+          const tgtSent = Math.max(0, this.numSentsShown[1][this.seg] - 1);
+          this.goto(this.seg, 1, tgtSent);
         } else {
-          if (this.seg + 1 < this.segments.length) {
+          /**
+           * By using Tab to switch sides, it's possible that you
+           * haven't yet seen all of side 0 (src). Check:
+           */
+          if (!this.segFullySeen(this.seg)) {
+            this.switchSides();
+          } else if (this.seg + 1 < this.segments.length) {
+            /** Goto: start sentence of next seg, src side (tgt for tgtOnly). */
             this.goto(this.seg + 1, this.tgtOnly ? 1 : 0, 0);
           }
         }
@@ -761,7 +803,6 @@ class AntheaEval {
     if (!currEval) {
       return;
     }
-    // TODO(vratnakar): maybe append cursor.{side,sent} info to action.
     const timing = currEval.timing;
     if (!timing) {
       return;
@@ -770,12 +811,26 @@ class AntheaEval {
       timing[action] = {
         count: 0,
         timeMS: 0,
+        /**
+         * This is a log of event details, including timestamps, for
+         * reconstructing the rater behavior fully when needed.
+         */
+        log: [],
       };
     }
     const tinfo = timing[action];
     tinfo.count++;
     currEval.timestamp = Date.now();
     tinfo.timeMS += (currEval.timestamp - this.lastTimestampMS_);
+    const details = {
+      ts: currEval.timestamp,
+      side: this.cursor.side,
+      sentence: this.cursor.sent,
+    };
+    if (!this.cursor.srcVisible(this.cursor.seg)) {
+      details.source_not_seen = true;
+    }
+    tinfo.log.push(details);
     this.lastTimestampMS_ = currEval.timestamp;
     this.saveResults();
   }
@@ -913,7 +968,7 @@ class AntheaEval {
       }
       for (let e = 0; e < evalResult.errors.length; e++) {
         if (sentErrorIndices[e]) {
-          this.displayError(evalResult.errors, e);
+          this.displayError(evalResult, e);
         }
       }
       if (this.markedPhrase_) {
@@ -925,7 +980,6 @@ class AntheaEval {
           tokenSpans[x].style.backgroundColor = color;
         }
       }
-      this.noteTiming('visited-or-redrawn');
     }
 
     const hasBeenRead = this.cursor.hasBeenRead(seg, side, sent);
@@ -994,13 +1048,14 @@ class AntheaEval {
   }
 
   /**
-   * Displays the previously marked error in errors[index], alongside the
-   *     current segment. The displayed error also includes an "x" button
+   * Displays the previously marked error in evalResult.errors[index], alongside
+   *     the current segment. The displayed error also includes an "x" button
    *     for deleting it.
-   * @param {!Array<!Object>} errors
+   * @param {!Object} evalResult
    * @param {number} index
    */
-  displayError(errors, index) {
+  displayError(evalResult, index) {
+    const errors = evalResult.errors;
     const error = errors[index];
     const tr = document.createElement('tr');
     this.evalPanelErrors_.appendChild(tr);
@@ -1043,6 +1098,24 @@ class AntheaEval {
     } else {
       delButton.addEventListener('click', (e) => {
         e.preventDefault();
+        /** Save timing info from the deleted error. */
+        const timing = errors[index].metadata.timing ?? {};
+        for (let action of Object.keys(timing)) {
+          if (!evalResult.timing.hasOwnProperty(action)) {
+            evalResult.timing[action] = {
+              count: 0,
+              timeMS: 0,
+              log: [],
+            };
+            evalResult.timing[action].count += timing[action].count;
+            evalResult.timing[action].timeMS += timing[action].timeMS;
+            const log = timing[action].log ?? [];
+            for (let detail of log) {
+              evalResult.timing[action].log.push(detail);
+            }
+          }
+        }
+        this.noteTiming('deleted-error');
         errors.splice(index, 1);
         this.refreshCurrSentence();
       });
@@ -1245,6 +1318,7 @@ class AntheaEval {
     if (this.config.TARGET_SIDE_ONLY) {
       return;
     }
+    this.noteTiming('switch-sides');
     this.cursor.switchSides();
     this.redrawAllSegments();
     this.ensureCurrSentVisible();
@@ -1254,6 +1328,7 @@ class AntheaEval {
    * Navigates to the previous sentence.
    */
   handlePrev() {
+    this.noteTiming('back-arrow');
     this.cursor.prev();
     this.redrawAllSegments();
     this.ensureCurrSentVisible();
@@ -1263,6 +1338,7 @@ class AntheaEval {
    * Navigates to the next sentence.
    */
   handleNext() {
+    this.noteTiming('next-arrow');
     if (!this.finishCurrSentence()) {
       return;
     }
@@ -1316,6 +1392,7 @@ class AntheaEval {
       markedError.metadata = {};
     }
     markedError.metadata.sentence_index = this.cursor.sent;
+    markedError.metadata.side = this.cursor.side;
 
     if (markedError.needs_note) {
       markedError.metadata.note = prompt(
@@ -1350,7 +1427,7 @@ class AntheaEval {
       }
       evalResult.timing = {};
       evalResult.errors.push(markedError);
-      this.displayError(evalResult.errors, evalResult.errors.length - 1);
+      this.displayError(evalResult, evalResult.errors.length - 1);
     }
     this.resetMQMRating();
 
@@ -1477,7 +1554,7 @@ class AntheaEval {
           }
           subtypeButton.addEventListener('click', (e) => {
             e.preventDefault();
-            this.setMQMType(type, subtype);
+            this.handleErrorTypeClick(type, subtype);
           });
           this.buttons_[this.errorButtonKey(type, subtype)] = subtypeButton;
           if (!subtypeInfo.hidden) {
@@ -1502,7 +1579,7 @@ class AntheaEval {
       } else {
         errorButton.addEventListener('click', (e) => {
           e.preventDefault();
-          this.setMQMType(type);
+          this.handleErrorTypeClick(type);
         });
       }
       errorButton.disabled = true;
@@ -1569,7 +1646,6 @@ class AntheaEval {
   setMQMSeverity(severityId) {
     this.severityId_ = severityId;
     this.severity_ = this.config.severities[severityId];
-    this.noteTiming('chose-severity-' + severityId);
     if (this.markedPhrase_ && this.severity_.forced_error) {
       this.setMQMType('');
       return;
@@ -1585,7 +1661,6 @@ class AntheaEval {
   setMQMType(type, subtype = '') {
     this.errorType_ = type;
     this.errorSubtype_ = subtype;
-    this.noteTiming('chose-error-' + type + (subtype ? '-' + subtype : ''));
     const errorInfo = this.config.errors[type];
     if (errorInfo.override_all_errors) {
       this.setMQMSeverity('major');
@@ -1634,7 +1709,7 @@ class AntheaEval {
   }
 
   /**
-   * Handles a click on a "<severity>" button.
+   * Handles a click on a "<severity>" button or its hotkey.
    * @param {string} severityId
    */
   handleSeverityClick(severityId) {
@@ -1649,6 +1724,16 @@ class AntheaEval {
     } else {
       this.setMQMSeverity(severityId);
     }
+  }
+
+  /**
+   * Handles a click on an error "<type>/<subsubtype>" button.
+   * @param {string} type
+   * @param {string=} subtype
+   */
+  handleErrorTypeClick(type, subtype='') {
+    this.noteTiming('chose-error-' + type + (subtype ? '-' + subtype : ''));
+    this.setMQMType(type, subtype);
   }
 
   /**
@@ -1694,39 +1779,23 @@ class AntheaEval {
 
   /**
    * If the text is sufficiently long, then this function injects a deliberate
-   *     translation error in some part of the text (currently it reverses a
-   *     long-enough sub-phrase). The returned object includes a "corrupted"
-   *     field that has the corrupted text (empty if no corruption was done),
-   *     and a "display" field suitable for revealing after the corruption is
-   *     undone.
+   * translation error in some part of the text by reversing a long-enough
+   * sub-phrase). See return format in injectHotw() documentation.
    * @param {string} text
    * @return {!Object}
    */
-  static injectErrors(text) {
+  static injectHotwWordsFlipped(text) {
     const ret = {
       corrupted: '',
       display: '',
     };
+    const tokenization = AntheaEval.tokenize_with_zwsp(text);
     /**
-     * "pieces" will be an array of tokens, including text as well as separators
-     * (spaces and 0-width spaces). Error injection is done by reversing a
-     * segment from "pieces" that starts and ends on separators.
+     * Error injection is done by reversing a segment from tokens that starts
+     * and ends on separators.
      */
-    const pieces = [];
-    let piece = '';
-    const seps = [];
-    for (let c of text) {
-      if (c == ' ' || c == '\u200b') {
-        if (piece) pieces.push(piece);
-        seps.push(pieces.length);
-        pieces.push(c);
-        piece = '';
-      } else {
-        piece += c;
-      }
-    }
-    if (piece) pieces.push(piece);
-
+    const tokens = tokenization.tokens;
+    const seps = tokenization.separator_indices;
     if (seps.length <= 6) {
       // Too short.
       return ret;
@@ -1737,14 +1806,105 @@ class AntheaEval {
     const end = Math.min(seps.length - 1, start + 4 + this.getRandomInt(4));
     const endi = seps[end];
     // Reverse
-    ret.corrupted = pieces.slice(0, starti + 1).join('') +
-      pieces.slice(starti + 1, endi).reverse().join('') +
-      pieces.slice(endi).join('');
+    ret.corrupted = tokens.slice(0, starti + 1).join('') +
+      tokens.slice(starti + 1, endi).reverse().join('') +
+      tokens.slice(endi).join('');
     ret.display = '<span class="anthea-hotw-revealed">' +
-      pieces.slice(starti + 1, endi).reverse().join('') + '</span>';
+      tokens.slice(starti + 1, endi).reverse().join('') + '</span>';
+    ret.hotwType = 'words-flipped';
     return ret;
   }
 
+  /**
+   * If the text has a sufficiently long word, then this function injects a
+   * deliberate translation error in some part of the text by reversing a
+   * long-enough sub-string in a word. See return format in injectHotw()
+   * documentation.
+   * @param {string} text
+   * @return {!Object}
+   */
+  static injectHotwLettersFlipped(text) {
+    const ret = {
+      corrupted: '',
+      display: '',
+    };
+    const tokenization = AntheaEval.tokenize_with_zwsp(text);
+    /**
+     * Error injection is done by reversing a long word.
+     */
+    const tokens = tokenization.tokens;
+    const longTokenIndices = [];
+    const MIN_LETTERS_FLIPPED = 4;
+    const MIN_LETTERS = 5;
+    for (let t = 0; t < tokens.length; t++) {
+      if (tokens[t].length >= MIN_LETTERS) longTokenIndices.push(t);
+    }
+
+    if (longTokenIndices.length == 0) {
+      return ret;
+    }
+    const index = longTokenIndices[this.getRandomInt(longTokenIndices.length)];
+    const tokenLetters = tokens[index].split('');
+    const offsetLimit = tokenLetters.length - MIN_LETTERS_FLIPPED + 1;
+    const startOffset = this.getRandomInt(offsetLimit);
+    const sliceLengthLimit = tokenLetters.length - startOffset + 1;
+    const sliceLength = MIN_LETTERS_FLIPPED + this.getRandomInt(
+        sliceLengthLimit - MIN_LETTERS_FLIPPED);
+    const rev = tokenLetters.slice(
+        startOffset, startOffset + sliceLength).reverse().join('');
+    if (rev == tokenLetters.slice(
+                   startOffset, startOffset + sliceLength).join('')) {
+      /* We found a palindrome. Give up on this one. */
+      return ret;
+    }
+    tokens[index] = tokenLetters.slice(0, startOffset).join('') + rev +
+                    tokenLetters.slice(startOffset + sliceLength).join('');
+
+    // Reverse
+    ret.corrupted = tokens.join('');
+    ret.display = '<span class="anthea-hotw-revealed">' + tokens[index] +
+                  '</span>';
+    ret.hotwType = 'letters-flipped';
+    return ret;
+  }
+
+  /**
+   * Pretend to inject an HOTW error, but don't actually do it. Only used
+   * for training demos. See return format in injectHotw() documentation.
+   * @param {string} text
+   * @return {!Object}
+   */
+  static injectHotwPretend(text) {
+    return {
+      corrupted: text,
+      display: '[Not a real injected error: only a training demo]',
+      hotwType: 'pretend-hotw',
+    };
+  }
+
+  /**
+   * If possible, inject an HOTW error in the text. The returned object includes
+   * a "corrupted" field that has the corrupted text (empty if no corruption
+   * could be done), a "display" field suitable for revealing after the
+   * corruption is undone, and an "hotwType" field.
+   * @param {string} text
+   * @param {boolean} hotwPretend Only pretend to insert error for training.
+   * @return {!Object}
+   */
+  static injectHotw(text, hotwPretend) {
+    if (hotwPretend) {
+      return AntheaEval.injectHotwPretend(text);
+    }
+    /* 60% chance for words-flipped, 40% for letter-flipped */
+    const tryWordsFlipped = this.getRandomInt(100) < 60;
+    if (tryWordsFlipped) {
+      const ret = AntheaEval.injectHotwWordsFlipped(text);
+      if (ret.corrupted) {
+        return ret;
+      }
+    }
+    return AntheaEval.injectHotwLettersFlipped(text);
+  }
 
   /**
    * Tokenizes text, splitting on space and on zero-width space. The zero-width
@@ -1773,6 +1933,34 @@ class AntheaEval {
   }
 
   /**
+   * Tokenizes text, splitting on space and on zero-width space. Spaces, ZWSPs,
+   * and empty strings can occur in the output array. Returns an object that
+   * has an array property named tokens and an array property named
+   * separator_indices (that stores token indices for spaces and ZWSPs).
+   * @param {string} text
+   * @return {!Object}
+   */
+  static tokenize_with_zwsp(text) {
+    const ret = {
+      tokens: [],
+      separator_indices: [],
+    };
+    let piece = '';
+    for (let c of text) {
+      if (c == ' ' || c == '\u200b') {
+        if (piece) ret.tokens.push(piece);
+        ret.separator_indices.push(ret.tokens.length);
+        ret.tokens.push(c);
+        piece = '';
+      } else {
+        piece += c;
+      }
+    }
+    if (piece) ret.tokens.push(piece);
+    return ret;
+  }
+
+  /**
    * Wraps each non-space token in text in a SPAN of class "anthea-word" and
    * each space in a SPAN of class "anthea-space".
    * @param {string} text
@@ -1787,6 +1975,9 @@ class AntheaEval {
     };
     const tokens = AntheaEval.tokenize(text);
     const SEP = '<span class="anthea-space"> </span>';
+    if (tokens.length > 0 && tokens[tokens.length - 1] == ' ') {
+      appendSpace = false;
+    }
     for (let token of tokens) {
       if (token == ' ') {
         ret.spannified += SEP;
@@ -1812,31 +2003,37 @@ class AntheaEval {
    *   spanHTML: The HTML version of the sentence, with tokens wrapped in spans.
    *   hotwSpanHTML: Empty, or spanHTML variant with HOTW error-injected.
    *   injectedError: Empty, or the HOTW error.
+   *   hotwType: Empty, or a description of the injected HOTW error.
    *   numWords: The number of word tokens in the sentence.
-   *   numSPaces: The number of space tokens in the sentence.
+   *   numSpaces: The number of space tokens in the sentence.
    *   firstToken: The index of the first token (word or space).
    *   lastToken: The index of the last token (word or space).
    * In the HTML, each inter-word space is wrapped in a SPAN of class
    * "anthea-space" and each word is wrapped in a SPAN of class "anthea-word".
-   * Adds a trailing space token to the last sentence.
-   * 
+   * Adds a trailing space token to the last sentence unless addEndSpaces
+   * is false or there already is a space there.
+   *
    * @param {string} text
+   * @param {boolean} addEndSpaces
    * @param {number} hotwPercent
+   * @param {boolean=} hotwPretend
    * @return {!Array<!Object>}
    */
-  static splitAndSpannify(text, hotwPercent) {
+  static splitAndSpannify(text, addEndSpaces,
+                          hotwPercent, hotwPretend=false) {
     const sentInfos = [];
     const sentences = text.split('\u200b\u200b');
     let tokenIndex = 0;
     for (let s = 0; s < sentences.length; s++) {
-      const appendSpace = (s == sentences.length - 1);
+      const appendSpace = addEndSpaces && (s == sentences.length - 1);
       const sentence = sentences[s];
       const spannifyRet = AntheaEval.spannifyWords(sentence, appendSpace);
       const spanHTML = spannifyRet.spannified;
       let hotwSpanHTML = '';
       let injectedError = '';
+      let hotwType = '';
       if (hotwPercent > 0 && (100 * Math.random()) < hotwPercent) {
-        const ret = AntheaEval.injectErrors(sentence);
+        const ret = AntheaEval.injectHotw(sentence, hotwPretend);
         if (ret.corrupted) {
           const hotwSpannifyRet = AntheaEval.spannifyWords(
               ret.corrupted, appendSpace);
@@ -1846,6 +2043,7 @@ class AntheaEval {
             /* .. and commit to using this HOTW injected error. */
             hotwSpanHTML = hotwSpannifyRet.spannified;
             injectedError = ret.display;
+            hotwType = ret.hotwType;
           }
         }
       }
@@ -1856,6 +2054,7 @@ class AntheaEval {
         spanHTML: spanHTML,
         hotwSpanHTML: hotwSpanHTML,
         injectedError: injectedError,
+        hotwType: hotwType,
         numWords: spannifyRet.numWords,
         numSpaces: spannifyRet.numSpaces,
         firstToken: sentStartToken,
@@ -1913,6 +2112,7 @@ class AntheaEval {
     if (!this.READ_ONLY && (this.startedMarking_ || this.cursor.doc == 0)) {
       return;
     }
+    this.noteTiming('prev-document');
     if (!this.finishCurrSentence()) {
       return;
     }
@@ -1937,6 +2137,7 @@ class AntheaEval {
          !this.cursor.seenDocEnd())) {
       return;
     }
+    this.noteTiming('next-document');
     if (!this.finishCurrSentence()) {
       return;
     }
@@ -1953,12 +2154,41 @@ class AntheaEval {
   }
 
   /**
+   * Builds instructions from section contents and section order. Section order
+   * and individual section contents (distinguished by name) can be specified in
+   * the template; if left unspecified, defaults are taken from
+   * template-base.js.
+   *
+   * @return {string}
+   */
+  buildInstructions() {
+    const order = this.config.instructions_section_order ||
+                antheaTemplateBase.instructions_section_order;
+    let sections = antheaTemplateBase.instructions_section_contents;
+    // Add or override each custom section content defined in the template, if
+    // any.
+    if (this.config.instructions_section_contents) {
+      for (let section_name in this.config.instructions_section_contents) {
+        sections[section_name] =
+            this.config.instructions_section_contents[section_name];
+      }
+    }
+    let builtInstructions = '';
+    for (let section_name of order) {
+      builtInstructions += sections[section_name];
+    }
+    return builtInstructions;
+  }
+
+  /**
    * Populates an instructions panel with instructions and lists of severities
    * and error types for MQM.
    * @param {!Element} panel The DIV element to populate.
    */
   populateMQMInstructions(panel) {
-    panel.innerHTML = (this.config.instructions || '') +
+    // Use hard-coded instructions if present, otherwise build from
+    // (possibly default) section order and contents.
+    panel.innerHTML = (this.config.instructions || this.buildInstructions()) +
         (!this.config.SKIP_RATINGS_TABLES ? `
       <p>
         <details open>
@@ -2575,29 +2805,52 @@ class AntheaEval {
    * @param {!Element} evalDiv The DIV in which to create the eval.
    * @param {string} templateName The template name.
    * @param {!Array<!Object>} projectData Project data, including src/tgt
-   *     sentences. The array also may have srcLang/tgtLang properties.
+   *     sentences. The array also may have a "parameters" property.
    * @param {?Array<!Object>} projectResults Previously saved partial results.
    * @param {number=} hotwPercent Percent rate for HOTW testing.
    */
   setUpEval(evalDiv, templateName, projectData, projectResults, hotwPercent=0) {
-    if (antheaTemplates[templateName]) {
+    if (typeof antheaTemplateBase == 'object' &&
+        antheaTemplates[templateName]) {
+      /** We have all the pieces. */
       this.setUpEvalWithConfig(
           evalDiv, templateName, antheaTemplates[templateName], projectData,
           projectResults, hotwPercent);
       return;
     }
-    /**
-     * We set the template to an empty object so that we do not keep retrying
-     * to load the template file.
-     */
-    antheaTemplates[templateName] = {};
-    googdom.setInnerHtml(evalDiv, 'Loading template ' + templateName + '...');
-    const scriptTag = document.createElement('script');
-    scriptTag.src = this.scriptUrlPrefix_ + 'template-' +
-                    templateName.toLowerCase() + '.js';
-    scriptTag.onload = this.setUpEval.bind(
+    const retrier = this.setUpEval.bind(
         this, evalDiv, templateName, projectData, projectResults, hotwPercent);
-    document.head.append(scriptTag);
+    googdom.setInnerHtml(
+        evalDiv, 'Loading base & template ' + templateName + '...');
+    if (!this.loadedTemplateBase) {
+      this.loadedTemplateBase = true;
+      const scriptTag = document.createElement('script');
+      scriptTag.src = this.scriptUrlPrefix_ + 'template-base.js';
+      scriptTag.onload = retrier;
+      document.head.append(scriptTag);
+    }
+    if (!this.loadedTemplate) {
+      this.loadedTemplate = true;
+      const scriptTag = document.createElement('script');
+      scriptTag.src = this.scriptUrlPrefix_ + 'template-' +
+                      templateName.toLowerCase() + '.js';
+      scriptTag.onload = retrier;
+      document.head.append(scriptTag);
+    }
+  }
+
+  /**
+   * Returns true if the language code (BCP-47) is for a language that
+   * generally uses spaces between sentences.
+   * @param {string} lang BCP 47 code
+   * @return {boolean}
+   */
+  isSpaceSepLang(lang) {
+    const lowerLang = lang.toLowerCase();
+    if (lowerLang.startsWith('ja') || lowerLang.startsWith('zh')) {
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -2608,7 +2861,7 @@ class AntheaEval {
    * @param {string} templateName The template name.
    * @param {!Object} config The template configuration object.
    * @param {!Array<!Object>} projectData Project data, including src/tgt
-   *     sentences. The array also may have srcLang/tgtLang properties.
+   *     sentences. The array also may have a "parameters" property.
    * @param {?Array<!Object>} projectResults Previously saved partial results.
    * @param {number} hotwPercent Percent rate for HOTW testing.
    */
@@ -2632,22 +2885,52 @@ class AntheaEval {
     this.contextRow_ = googdom.createDom('tr', 'anthea-context-row');
     this.contextRow_.style.display = 'none';
 
-    const srcHeading = projectData.srcLang ?
-        ('Source (' + projectData.srcLang + ')') : 'Source';
-    const srcHeadingTD = googdom.createDom(
-        'td', 'anthea-text-heading',
-        googdom.createDom('div', null, srcHeading));
+    const parameters = projectData.parameters || {};
+    const srcLang = parameters.source_language || '';
+    const tgtLang = parameters.target_language || '';
+    if (parameters.hasOwnProperty('hotw_percent')) {
+      /* Override the passed value */
+      hotwPercent = parameters.hotw_percent;
+    }
+    /** Are we only pretending to add hotw errors, for training? */
+    const hotwPretend = parameters.hotw_pretend || false;
+
+    const srcHeading = srcLang ? ('Source (' + srcLang + ')') : 'Source';
+    const srcHeadingDiv = googdom.createDom('div', null, srcHeading);
+
     const targetLabel = config.TARGET_SIDE_ONLY ? 'Text' : 'Translation';
-    const tgtHeading = projectData.tgtLang ?
-        (targetLabel + ' (' + projectData.tgtLang + ')') : targetLabel;
-    const tgtHeadingTD = googdom.createDom(
-        'td', 'anthea-text-heading',
-        googdom.createDom('div', null, tgtHeading));
+    const tgtHeading = tgtLang ?
+        (targetLabel + ' (' + tgtLang + ')') : targetLabel;
+    const tgtHeadingDiv = googdom.createDom('div', null, tgtHeading);
+
     const evalHeading = this.READ_ONLY ?
         'Evaluations (view-only)' : 'Evaluations';
+    const evalHeadingDiv = googdom.createDom('div', null, evalHeading);
+
+    if (config.subheadings) {
+      if (config.subheadings.source) {
+        srcHeadingDiv.appendChild(googdom.createDom('br'));
+        srcHeadingDiv.appendChild(googdom.createDom(
+            'span', 'anthea-subheading', config.subheadings.source));
+      }
+      if (config.subheadings.target) {
+        tgtHeadingDiv.appendChild(googdom.createDom('br'));
+        tgtHeadingDiv.appendChild(googdom.createDom(
+            'span', 'anthea-subheading', config.subheadings.target));
+      }
+      if (config.subheadings.evaluations) {
+        evalHeadingDiv.appendChild(googdom.createDom('br'));
+        evalHeadingDiv.appendChild(googdom.createDom(
+            'span', 'anthea-subheading', config.subheadings.evaluations));
+      }
+    }
+
+    const srcHeadingTD = googdom.createDom(
+        'td', 'anthea-text-heading', srcHeadingDiv);
+    const tgtHeadingTD = googdom.createDom(
+        'td', 'anthea-text-heading', tgtHeadingDiv);
     const evalHeadingTD = googdom.createDom(
-        'td', 'anthea-text-heading',
-        googdom.createDom('div', null, evalHeading));
+        'td', 'anthea-text-heading', evalHeadingDiv);
     const docTextTable = googdom.createDom(
         'table', 'anthea-document-text-table',
         googdom.createDom(
@@ -2687,6 +2970,8 @@ class AntheaEval {
       const tgtSegments = docsys.tgtSegments;
       let srcSpannified = '<p class="anthea-source-para" dir="auto">';
       let tgtSpannified = '<p class="anthea-target-para" dir="auto">';
+      const addEndSpacesSrc = this.isSpaceSepLang(srcLang);
+      const addEndSpacesTgt = this.isSpaceSepLang(tgtLang);
       for (let i = 0; i < srcSegments.length; i++) {
         if (srcSegments[i].length == 0) {
           /* New paragraph. */
@@ -2710,9 +2995,11 @@ class AntheaEval {
           srcText: srcSegments[i],
           tgtText: tgtSegments[i],
           numTgtWords: 0,
-          srcSents: AntheaEval.splitAndSpannify(srcSegments[i], 0),
+          srcSents: AntheaEval.splitAndSpannify(
+              srcSegments[i], addEndSpacesSrc, 0),
           tgtSents: AntheaEval.splitAndSpannify(
-              tgtSegments[i], this.READ_ONLY ? 0 : hotwPercent),
+              tgtSegments[i], addEndSpacesTgt,
+              this.READ_ONLY ? 0 : hotwPercent, hotwPretend),
         };
         this.segments_.push(segment);
 
@@ -2734,6 +3021,7 @@ class AntheaEval {
             tgtSent.hotw = {
               'timestamp': this.lastTimestampMS_,
               'injected_error': tgtSent.injectedError,
+              'hotw_type': tgtSent.hotwType,
               'sentence_index': t,
               'done': false,
               'found': false,
@@ -2818,13 +3106,8 @@ class AntheaEval {
       config: config,
       hotw_percent: hotwPercent,
       anthea_version: this.VERSION,
+      ...parameters,
     };
-    if (projectData.srcLang) {
-      metadata.source_language = projectData.srcLang;
-    }
-    if (projectData.tgtLang) {
-      metadata.target_language = projectData.tgtLang;
-    }
     this.manager_.setMetadata(metadata);
 
     // Extract page contexts if the config expects them.

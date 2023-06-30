@@ -109,10 +109,11 @@ flags.DEFINE_bool('aligned_relative_attention', True,
                   'targets and encoded I/O examples.')
 
 flags.DEFINE_enum('dataset_type', 'deepcoder',
-                  ['robust_fill', 'robust_fill_base', 'deepcoder'],
+                  ['robustfill', 'deepcoder'],
                   'The kind of dataset to use.')
 flags.DEFINE_enum('model_type', 'spec_decomposer_model',
-                  ['spec_decomposer_model', 'synthesizer_model', 'joint_model'],
+                  ['spec_decomposer_model', 'synthesizer_model', 'joint_model',
+                   'baseline_model'],
                   'Which model to train.')
 
 
@@ -371,7 +372,7 @@ def predict_step(params,
       cache,
       tokens_ids_to_logits,
       beam_size=beam_size,
-      alpha=0.6,
+      alpha=0.0,
       bos_token=config.base_config.bos_token,
       eos_token=eos_token,
       max_decode_len=max_decode_len,
@@ -393,15 +394,17 @@ def run_program(program, inputs):
     program: A program returned from `decode_program()`.
     inputs: A list of inputs as returned by `decode_io`.
   """
-  if FLAGS.dataset_type in ['robust_fill', 'robust_fill_base']:
+  if FLAGS.dataset_type == 'robustfill':
     return [program(i) for i in inputs]
   elif FLAGS.dataset_type == 'deepcoder':
-    # `program` is a deepcoder_dsl.Statement.
-    statement = program
-    if statement is None:
+    # `program` is a deepcoder_dsl.Statement or deepcoder_dsl.Program.
+    if program is None:
       return [None] * len(inputs)
     initial_states = [deepcoder_dsl.ProgramState.from_str(i) for i in inputs]
-    result_states = [statement.run(state) for state in initial_states]
+    if FLAGS.model_type == 'baseline_model':
+      result_states = [program.run(state.state) for state in initial_states]
+    else:
+      result_states = [program.run(state) for state in initial_states]
     outputs = [deepcoder_dsl.result_to_str(result_state.get_output())
                if result_state else None
                for result_state in result_states]
@@ -427,7 +430,7 @@ def eval_predicted_synthesizer_model(predicted, inputs, outputs,
 
   # predicted shape [beam_size, length]
   for beam in predicted[::-1]:
-    if FLAGS.dataset_type in ['robust_fill', 'robust_fill_base']:
+    if FLAGS.dataset_type == 'robustfill':
       program = decode_program(beam)
       try:
         p_outs = run_program(program, inputs)
@@ -555,7 +558,7 @@ def main(_):
   # ---------------------------------------------------------------------------
 
   # Build token tables.
-  if FLAGS.dataset_type in ['robust_fill', 'robust_fill_base']:
+  if FLAGS.dataset_type == 'robustfill':
     spec_vocab = robust_fill_dsl.CHARACTER + input_pipeline.SEPARATOR_TOKEN
     spec_id_token_table = {i+3: token
                            for i, token in enumerate(spec_vocab)}
@@ -586,7 +589,7 @@ def main(_):
   # Parse io and program token sequences (for eval).
   def decode_io(inputs, outputs):
     """Converts from int tensors to strings."""
-    if FLAGS.dataset_type == 'robust_fill':
+    if FLAGS.dataset_type == 'robustfill':
       def decode_str(s):
         """Decode string tokens."""
         return ''.join([spec_id_token_table[t_id] for t_id in s if t_id > 0])
@@ -611,7 +614,7 @@ def main(_):
     """Converts from int tensor to a string."""
     target = target[:np.argmax(target == eos_id)].astype(np.int32)
 
-    if FLAGS.dataset_type == 'robust_fill':
+    if FLAGS.dataset_type == 'robustfill':
       target = target[target != bos_id].tolist()
       return ''.join([spec_id_token_table[t_id] for t_id in target if t_id > 0])
     elif FLAGS.dataset_type == 'deepcoder':
@@ -622,10 +625,10 @@ def main(_):
       raise ValueError('Unhandled dataset_type: {}'.format(FLAGS.dataset_type))
 
   def decode_program(program):
-    """Decode program tokens into a program (program object or string)."""
+    """Decode program tokens into a program object."""
     program = program[:np.argmax(program == eos_id) + 1].astype(np.int32)
 
-    if FLAGS.dataset_type == 'robust_fill':
+    if FLAGS.dataset_type == 'robustfill':
       # Returns either a Concat program object, or None.
       program = program[program != bos_id].tolist()
       try:
@@ -636,15 +639,19 @@ def main(_):
     if FLAGS.dataset_type == 'deepcoder':
       tokens = [program_id_token_table[t_id] for t_id in program.tolist()
                 if t_id > 0 and t_id != eos_id and t_id != bos_id]
-      # For DeepCoder, the model only predicts the RHS of the next statement.
-      # Note that `output` is not a valid variable name token. That should not
-      # matter if we only run this statement on a program state, without
-      # constructing a full Program using this statement.
-      statement_str = 'output = ' + ' '.join(tokens)
       try:
-        return deepcoder_dsl.Statement.from_str(statement_str,
-                                                check_variable_name=False)
-      except deepcoder_dsl.ParseError:
+        if FLAGS.model_type == 'baseline_model':
+          # Parse the entire program.
+          return deepcoder_dsl.Program.from_tokens(tokens)
+        else:
+          # For DeepCoder, the model only predicts the RHS of the next
+          # statement. Note that `output` is not a valid variable name token.
+          # That should not matter if we only run this statement on a program
+          # state, without constructing a full Program using this statement.
+          statement_str = 'output = ' + ' '.join(tokens)
+          return deepcoder_dsl.Statement.from_str(statement_str,
+                                                  check_variable_name=False)
+      except (deepcoder_dsl.ParseError, deepcoder_dsl.RunError):
         return None  # Program does not compile.
 
     else:
@@ -652,7 +659,7 @@ def main(_):
 
   def decode_program_str(program):  # pylint: disable=unused-variable
     """Decode program tokens into a string."""
-    if FLAGS.dataset_type == 'robust_fill':
+    if FLAGS.dataset_type == 'robustfill':
       try:
         return decode_program(program).to_string()  # pytype: disable=attribute-error
       except:  # pylint: disable=bare-except
@@ -669,12 +676,15 @@ def main(_):
   logging.info('Initializing dataset.')
   if not FLAGS.dataset_dir:
     raise ValueError('Must specify dataset_dir.')
+  decomposition_or_entire_programs = (
+      'entire_programs' if FLAGS.model_type == 'baseline_model'
+      else 'decomposition_data')
   train_dataset_path = os.path.join(
       FLAGS.dataset_dir, f'{FLAGS.experiment}_data',
-      'decomposition_data_train.tf_records-*')
+      f'{decomposition_or_entire_programs}_train.tf_records-*')
   test_dataset_path = os.path.join(
       FLAGS.dataset_dir, f'{FLAGS.experiment}_data',
-      'decomposition_data_test.tf_records-*')
+      f'{decomposition_or_entire_programs}_test.tf_records-*')
 
   # Training dataset.
   logging.info('Loading dataset from %s', train_dataset_path)
@@ -685,8 +695,8 @@ def main(_):
   }
   logging.info('padded_shapes: %s', padded_shapes)
 
-  if FLAGS.dataset_type in ['robust_fill', 'deepcoder']:
-    if FLAGS.dataset_type == 'robust_fill':
+  if FLAGS.dataset_type in ['robustfill', 'deepcoder']:
+    if FLAGS.dataset_type == 'robustfill':
       input_pipeline_fn = input_pipeline.create_robust_fill_dataset
       program_part_key = 'program_part'
     else:
@@ -703,8 +713,6 @@ def main(_):
               'target': 'joined_next_part',
           })
     elif FLAGS.model_type == 'synthesizer_model':
-      # TODO(kshi): RobustFill doesn't have `corrupted_next_part` in the dataset
-      # yet, so trying to load it will break.
       create_dataset_fn = functools.partial(
           input_pipeline_fn,
           renaming_dict={
@@ -722,14 +730,23 @@ def main(_):
               'outputs': 'outputs',
               'target': program_part_key,
           })
+    elif FLAGS.model_type == 'baseline_model':
+      create_dataset_fn = functools.partial(
+          input_pipeline_fn,
+          renaming_dict={
+              'inputs': 'inputs',
+              'outputs': 'outputs',
+              'target': 'program',
+          })
     else:
       raise ValueError(f'Unhandled model_type: {FLAGS.model_type}')
 
   else:
     raise ValueError('Unhandled dataset_type: {}'.format(FLAGS.dataset_type))
 
-  dataset = create_dataset_fn(train_dataset_path, spec_token_id_table,
-                              FLAGS.num_examples)
+  dataset = create_dataset_fn(
+      train_dataset_path, spec_token_id_table, FLAGS.num_examples,
+      entire_programs=(FLAGS.model_type == 'baseline_model'))
   dataset = dataset.padded_batch(
       batch_size,
       padded_shapes=padded_shapes,
@@ -751,28 +768,44 @@ def main(_):
   train_ds = train_ds.repeat()
 
   test_dataset = create_dataset_fn(
-      test_dataset_path, spec_token_id_table,
-      FLAGS.num_examples)
-  test_dataset = test_dataset.padded_batch(
-      batch_size,
-      padded_shapes=predict_padded_shapes,
-      drop_remainder=False)
-  quick_test_dataset = (test_dataset
-                        .take(FLAGS.num_quick_test_steps)
-                        .unbatch()
-                        .padded_batch(int(np.ceil(batch_size / 10)),
-                                      padded_shapes=predict_padded_shapes))
-  final_test_dataset = (test_dataset
-                        .take(FLAGS.num_final_test_steps)
-                        .unbatch()
-                        .padded_batch(int(np.ceil(batch_size / 10)),
-                                      padded_shapes=predict_padded_shapes))
+      test_dataset_path, spec_token_id_table, FLAGS.num_examples,
+      entire_programs=(FLAGS.model_type == 'baseline_model'))
+  if FLAGS.model_type == 'baseline_model':
+    test_dataset = test_dataset.padded_batch(
+        1,
+        padded_shapes=predict_padded_shapes,
+        drop_remainder=False)
+    quick_test_dataset = (test_dataset
+                          # In end-to-end predict, we used 1000 programs
+                          # (not batches!).
+                          .take(1000)
+                          .unbatch()
+                          .padded_batch(10,
+                                        padded_shapes=predict_padded_shapes,
+                                        drop_remainder=False))
+    final_test_dataset = quick_test_dataset
+  else:
+    test_dataset = test_dataset.padded_batch(
+        batch_size,
+        padded_shapes=predict_padded_shapes,
+        drop_remainder=False)
+    quick_test_dataset = (test_dataset
+                          .take(FLAGS.num_quick_test_steps)
+                          .unbatch()
+                          .padded_batch(int(np.ceil(batch_size / 10)),
+                                        padded_shapes=predict_padded_shapes))
+    final_test_dataset = (test_dataset
+                          .take(FLAGS.num_final_test_steps)
+                          .unbatch()
+                          .padded_batch(int(np.ceil(batch_size / 10)),
+                                        padded_shapes=predict_padded_shapes))
 
   # Build Model and Optimizer
   # ---------------------------------------------------------------------------
   if FLAGS.model_type == 'spec_decomposer_model':
     output_vocab_size = spec_vocab_size
-  elif FLAGS.model_type in ['synthesizer_model', 'joint_model']:
+  elif FLAGS.model_type in ['synthesizer_model', 'joint_model',
+                            'baseline_model']:
     output_vocab_size = program_vocab_size
   else:
     raise ValueError(f'Unhandled model_type: {FLAGS.model_type}')
@@ -1015,7 +1048,7 @@ def main(_):
                 best_prediction, score = eval_predicted_synthesizer_model(
                     beams, inps, outs, decode_program)
                 decode_to_str_fn = decode_program_str
-              elif FLAGS.model_type == 'joint_model':
+              elif FLAGS.model_type in ['joint_model', 'baseline_model']:
                 ground_truth = decode_program_str(targets[i])
                 ground_truth_program = decode_program(targets[i])
                 ground_truth_outs = run_program(ground_truth_program, inps)
