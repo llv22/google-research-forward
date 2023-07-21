@@ -18,10 +18,12 @@
 import functools
 from absl.testing import parameterized
 import flax
+import jax
 import jax.numpy as jnp
 import numpy as np
 import tensorflow as tf
 
+from spin_spherical_cnns import layers
 from spin_spherical_cnns import models
 from spin_spherical_cnns import spin_spherical_harmonics
 from spin_spherical_cnns import test_utils
@@ -49,21 +51,37 @@ def _normalized_mean_absolute_error(x, y):
 
 class SpinSphericalBlockTest(tf.test.TestCase, parameterized.TestCase):
 
-  @parameterized.parameters(1, 2)
-  def test_downsampling_factor_output_shape(self, downsampling_factor):
+  @parameterized.parameters(
+      dict(downsampling_factor=1,
+           output_representation='spatial',
+           after_conv_module=layers.SpinSphericalBatchNormMagnitudeNonlin),
+      dict(downsampling_factor=2,
+           output_representation='spatial',
+           after_conv_module=layers.SpinSphericalBatchNormMagnitudeNonlin),
+      dict(downsampling_factor=2,
+           output_representation='spectral',
+           after_conv_module=layers.SpinSphericalSpectralBatchNormPhaseCollapse)
+      )
+  def test_downsampling_factor_output_shape(self,
+                                            downsampling_factor,
+                                            output_representation,
+                                            after_conv_module):
     transformer = _get_transformer()
     num_channels = 2
     spins_in = [0]
     spins_out = [0, 1]
     batch_size = 2
     resolution = 8
-    model = models.SpinSphericalBlock(num_channels=num_channels,
-                                      spins_in=spins_in,
-                                      spins_out=spins_out,
-                                      downsampling_factor=downsampling_factor,
-                                      spectral_pooling=False,
-                                      axis_name=None,
-                                      transformer=transformer)
+    model = models.SpinSphericalBlock(
+        num_channels=num_channels,
+        spins_in=spins_in,
+        spins_out=spins_out,
+        downsampling_factor=downsampling_factor,
+        spectral_pooling=False,
+        axis_name=None,
+        output_representation=output_representation,
+        after_conv_module=after_conv_module,
+        transformer=transformer)
 
     shape = [batch_size, resolution, resolution, len(spins_in), num_channels]
     inputs = jnp.ones(shape)
@@ -143,6 +161,71 @@ class SpinSphericalBlockTest(tf.test.TestCase, parameterized.TestCase):
     self.assertLess(
         _normalized_mean_absolute_error(coefficients_1, coefficients_2),
         0.1)
+
+
+class SpinSphericalResidualBlockTest(tf.test.TestCase, parameterized.TestCase):
+
+  @parameterized.parameters(
+      dict(num_channels=2, spins_in=(0,), spins_out=(0, 1)),
+      dict(num_channels=3, spins_in=(0, 1), spins_out=(0,)),
+      dict(
+          num_channels=1,
+          spins_in=(0, 1),
+          spins_out=(0, 1),
+          downsampling_factor=2,
+          spectral_pooling=False,
+      ),
+      dict(
+          num_channels=1,
+          spins_in=(0, 1),
+          spins_out=(0, 1, 2),
+          downsampling_factor=2,
+          spectral_pooling=True,
+      ),
+  )
+  def test_shape(
+      self,
+      num_channels,
+      spins_in,
+      spins_out,
+      downsampling_factor=1,
+      spectral_pooling=False,
+  ):
+    transformer = _get_transformer()
+    model = models.SpinSphericalResidualBlock(
+        num_channels,
+        spins_in,
+        spins_out,
+        downsampling_factor,
+        spectral_pooling,
+        axis_name=None,
+        transformer=transformer,
+    )
+
+    batch_size, resolution, num_channels_in = 2, 8, 3
+    input_shape = (
+        batch_size,
+        resolution,
+        resolution,
+        len(spins_in),
+        num_channels_in,
+    )
+    inputs = jnp.ones(input_shape)
+
+    rng = jax.random.PRNGKey(0)
+    params = model.init(rng, inputs, train=False)
+
+    outputs = model.apply(params, inputs, train=False)
+    self.assertEqual(
+        outputs.shape,
+        (
+            batch_size,
+            resolution // downsampling_factor,
+            resolution // downsampling_factor,
+            len(spins_out),
+            num_channels,
+        ),
+    )
 
 
 class SpinSphericalClassifierTest(tf.test.TestCase, parameterized.TestCase):

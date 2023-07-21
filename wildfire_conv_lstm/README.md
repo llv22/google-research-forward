@@ -12,8 +12,6 @@ the code for a Google colab.  To use this colab, you will need to first copy the
 
 # Google cloud
 
-WARNING: Work in progress.  The model checkpoints have not yet been made available on Google cloud (though the data now is available).
-
 All of the data and the model checkpoints are located on Google cloud.  To access the data, you can install the google cloud CLI, which this document will assume you've done (access to the cloud data can also be performed on the Google Cloud UI for users familiar with it).  For instructions on installing Google Cloud CLI:
 
 https://cloud.google.com/sdk/docs/install
@@ -88,8 +86,6 @@ gsutil cp gs://wildfire_conv_lstm/data/california_wn/00/real_wn_test_temporal.tf
 
 # Model Checkpoints
 
-WARNING: Model check points have not yet been made publicly available on Google Cloud.
-
 You can view all the model check points:
 
 ```
@@ -121,7 +117,7 @@ On the opening screen, select the "GitHub" tab, and then search for 'google-rese
 
 That should bring up the code in a colab.  Don't forget to connect to a server after loading up the colab.
 
-Next, copy over the data file and the model file to the colab server, using the colab file UI.  In this example, the files were copied over to the "tmp" directory.  Execute the first 3 cells to get all the code loaded.  Then in the final cell, enter the following fields:
+Next, copy over the data file and the model file to the colab server, using the colab file UI.  In this example, the files were copied over to the /tmp directory in the root directory of the colab server (any directory will do).  Execute the first 3 cells to get all the code loaded.  Then in the final cell, enter the following fields:
 
 input_file: /tmp/real_wn_test_temporal.tfr-00164-of-00165<br>
 input_model: /tmp/lstm.h5<br>

@@ -20,7 +20,7 @@ from absl.testing import parameterized
 import flax
 from flax import linen as nn
 import jax
-import jax.numpy as jnp
+from jax import numpy as jnp
 import numpy as np
 import tensorflow as tf
 
@@ -171,7 +171,8 @@ class SpinSphericalConvolutionTest(tf.test.TestCase, parameterized.TestCase):
            n_channels_in=2, n_channels_out=3,
            num_filter_params=4,
            spectral_pooling=True,
-           input_representation="spectral"),
+           input_representation="spectral",
+           use_bias=True),
   )
   def test_shape(self,
                  batch_size,
@@ -182,7 +183,8 @@ class SpinSphericalConvolutionTest(tf.test.TestCase, parameterized.TestCase):
                  spectral_pooling=False,
                  spectral_upsampling=False,
                  input_representation="spatial",
-                 output_representation="spatial"):
+                 output_representation="spatial",
+                 use_bias=False):
     """Checks that SpinSphericalConvolution outputs the right shape."""
     transformer = _get_transformer()
     if input_representation == "spectral":
@@ -202,7 +204,8 @@ class SpinSphericalConvolutionTest(tf.test.TestCase, parameterized.TestCase):
         spectral_pooling=spectral_pooling,
         spectral_upsampling=spectral_upsampling,
         input_representation=input_representation,
-        output_representation=output_representation)
+        output_representation=output_representation,
+        use_bias=use_bias)
     params = model.init(_JAX_RANDOM_KEY, inputs)
     out = model.apply(params, inputs)
 
@@ -405,6 +408,52 @@ class MagnitudeNonlinearityLeakyReluTest(tf.test.TestCase):
                         nn.leaky_relu(inputs[Ellipsis, 0, :].real))
 
 
+class PhaseCollapseNonlinearityTest(tf.test.TestCase, parameterized.TestCase):
+
+  @parameterized.parameters(dict(spins=(0,)), dict(spins=(0, 1)))
+  def test_shape(self, spins):
+    model = layers.PhaseCollapseNonlinearity(spins)
+    batch_size, resolution, num_channels = 2, 8, 3
+    input_shape = (batch_size, resolution, resolution, len(spins), num_channels)
+    inputs = jnp.ones(input_shape) + 1j * jnp.ones(input_shape)
+
+    rng = jax.random.PRNGKey(0)
+    params = model.init(rng, inputs)
+    outputs = model.apply(params, inputs)
+    self.assertEqual(
+        outputs.shape,
+        (batch_size, resolution, resolution, len(spins), num_channels),
+    )
+
+  @parameterized.parameters(
+      dict(spins=(0,)), dict(spins=(0, 1)), dict(spins=(-1, 0, 1))
+  )
+  def test_only_spin_zero_changes(self, spins):
+    model = layers.PhaseCollapseNonlinearity(spins)
+    batch_size, resolution, num_channels = 2, 8, 3
+    input_shape = (batch_size, resolution, resolution, len(spins), num_channels)
+    inputs = jnp.linspace(-1.0, 2.0, np.prod(input_shape)) + 1j * jnp.linspace(
+        0.5, -1.0, np.prod(input_shape)
+    )
+    inputs = inputs.reshape(input_shape)
+
+    idx_zero, idx_nonzero = layers.get_zero_nonzero_idx(spins)
+
+    rng = jax.random.PRNGKey(0)
+    params = model.init(rng, inputs)
+    outputs = model.apply(params, inputs)
+
+    with self.subTest("Zero spin changes."):
+      self.assertNotAllClose(
+          outputs[Ellipsis, idx_zero, :], inputs[Ellipsis, idx_zero, :]
+      )
+
+    with self.subTest("Nonzero spins do not change."):
+      self.assertAllClose(
+          outputs[Ellipsis, idx_nonzero, :], inputs[Ellipsis, idx_nonzero, :]
+      )
+
+
 class SphericalPoolingTest(tf.test.TestCase, parameterized.TestCase):
 
   @parameterized.parameters(4, 8)
@@ -535,6 +584,109 @@ class SpinSphericalBatchNormalizationTest(tf.test.TestCase,
         apply_args=apply_args)
 
     self.assertAllClose(coefficients_1, coefficients_2, atol=1e-5)
+
+
+class SpinSphericalBatchNormPhaseCollapseTest(
+    tf.test.TestCase, parameterized.TestCase
+):
+
+  @parameterized.parameters(
+      dict(train=False, shift=3), dict(train=True, shift=2)
+  )
+  def test_azimuthal_equivariance(self, train, shift):
+    resolution = 8
+    spins = (0, 1, 2)
+    transformer = _get_transformer()
+    model = layers.SpinSphericalBatchNormPhaseCollapse(spins=spins)
+    init_args = dict(use_running_stats=True)
+    apply_args = dict(use_running_stats=not train, mutable=["batch_stats"])
+
+    output_1, output_2 = test_utils.apply_model_to_azimuthally_rotated_pairs(
+        transformer,
+        model,
+        resolution,
+        spins,
+        init_args=init_args,
+        apply_args=apply_args,
+        shift=shift,
+    )
+
+    self.assertAllClose(output_1, output_2)
+
+  @parameterized.parameters(False, True)
+  def test_equivariance(self, train):
+    resolution = 16
+    spins = (0, 1)
+    transformer = _get_transformer()
+    model = layers.SpinSphericalBatchNormPhaseCollapse(spins=spins)
+    init_args = dict(use_running_stats=True)
+    apply_args = dict(use_running_stats=not train, mutable=["batch_stats"])
+
+    coefficients_1, coefficients_2, _ = test_utils.apply_model_to_rotated_pairs(
+        transformer,
+        model,
+        resolution,
+        spins,
+        init_args=init_args,
+        apply_args=apply_args,
+    )
+
+    # Tolerance needs to be high here due to the approximate equivariance of the
+    # pointwise operation under equiangular sampling.
+    self.assertAllClose(coefficients_1, coefficients_2, atol=1e-1)
+    self.assertLess(abs(coefficients_1 - coefficients_2).mean(), 5e-3)
+
+
+class SpinSphericalSpectralBatchNormalizationTest(
+    tf.test.TestCase, parameterized.TestCase
+):
+
+  def test_spectral_matches_spatial(self):
+    resolution = 16
+    shape = (4, resolution, resolution, 2, 3)
+    spins = (0, 1)
+    transformer = _get_transformer()
+    sphere, coefficients = test_utils.get_spin_spherical(
+        transformer, shape, spins
+    )
+    # Ensure mean zero for spin 0 so spatial matches spectral:
+    sphere_mean = sphere_utils.spin_spherical_mean(sphere[Ellipsis, [0], :])
+    sphere = sphere.at[Ellipsis, [0], :].add(-jnp.expand_dims(sphere_mean, (1, 2)))
+    coefficients = coefficients.at[:, 0].set(0.0)
+
+    key = jax.random.PRNGKey(0)
+
+    spatial_module = layers.SpinSphericalBatchNormalization(
+        spins=spins, use_running_stats=False
+    )
+    spatial_params = spatial_module.init(key, sphere)
+
+    spectral_module = layers.SpinSphericalSpectralBatchNormalization(
+        spins=spins, use_running_stats=False
+    )
+
+    spectral_params = spectral_module.init(key, coefficients)
+
+    spatial_output, _ = spatial_module.apply(
+        spatial_params, sphere, mutable=["batch_stats"]
+    )
+    spectral_output, _ = spectral_module.apply(
+        spectral_params, coefficients, mutable=["batch_stats"]
+    )
+
+    backward_transform = jax.vmap(
+        functools.partial(
+            transformer.apply,
+            method=TransformerModule.swsft_backward_spins_channels,
+        ),
+        in_axes=(None, 0, None),
+    )
+
+    variables = transformer.init(jax.random.PRNGKey(0))
+
+    self.assertAllClose(
+        backward_transform(variables, spectral_output, spins), spatial_output
+    )
 
 
 if __name__ == "__main__":

@@ -26,8 +26,10 @@ spatial equiangular representation the dimensions are (batch, lat, long, spin,
 channel), and for spectral coefficients, the dimensions are (batch, ell, m,
 spin, channel).
 """
+import abc
 import functools
 from typing import Any, Callable, Optional, Sequence, Tuple, Union
+from einshape.src.jax import jax_ops as einshape
 from flax import linen as nn
 import jax
 from jax import lax
@@ -41,6 +43,8 @@ from spin_spherical_cnns import spin_spherical_harmonics
 Array = Union[np.ndarray, jnp.ndarray]
 Initializer = Callable[[Any, Sequence[int], Any],
                        Array]
+FourierTransformer = spin_spherical_harmonics.SpinSphericalFourierTransformer
+DEFAULT_TRANSFORMER = FourierTransformer((4,), (0,))
 
 
 def _spin_spherical_convolution_from_spectral(
@@ -181,6 +185,8 @@ class SpinSphericalConvolution(nn.Module):
       'spatial' domain.
     output_representation: Whether to return outputs in the 'spectral'
       or 'spatial' domain.
+    use_bias: Whether to add learnable bias to the output. Not needed
+      when followed by batch normalization.
     initializer: initializer for the filter spectrum.
   """
   features: int
@@ -192,6 +198,7 @@ class SpinSphericalConvolution(nn.Module):
   num_filter_params: Optional[int] = None
   input_representation: str = "spatial"
   output_representation: str = "spatial"
+  use_bias: bool = False
   initializer: Optional[Initializer] = None
 
   def _get_kernel(self, ell_max, num_channels_in):
@@ -279,14 +286,24 @@ class SpinSphericalConvolution(nn.Module):
     vmap_convolution = jax.vmap(
         _spin_spherical_convolution,
         in_axes=(None, 0, None, None, None, None, None, None, None))
-    return vmap_convolution(self.transformer,
-                            sphere_or_coeffs, kernel,
-                            self.spins_in,
-                            self.spins_out,
-                            self.spectral_pooling,
-                            self.spectral_upsampling,
-                            self.input_representation,
-                            self.output_representation)
+    out = vmap_convolution(self.transformer,
+                           sphere_or_coeffs, kernel,
+                           self.spins_in,
+                           self.spins_out,
+                           self.spectral_pooling,
+                           self.spectral_upsampling,
+                           self.input_representation,
+                           self.output_representation)
+
+    if self.use_bias:
+      # Add complex bias to spin 0.
+      idx_zero, _ = get_zero_nonzero_idx(self.spins_out)
+      out = out.at[Ellipsis, idx_zero, :].add(
+          self.param("bias",
+                     _complex_zeros_initializer,
+                     (self.features,)))
+
+    return out
 
 
 class MagnitudeNonlinearity(nn.Module):
@@ -350,6 +367,48 @@ class MagnitudeNonlinearityLeakyRelu(nn.Module):
       outputs.append(outputs_spin)
 
     return jnp.concatenate(outputs, axis=-2)
+
+
+class PhaseCollapseNonlinearity(nn.Module):
+  """Nonlinearity that concatenates x to |x|.
+
+  This is inspired by Guth et al, "Phase Collapse in Neural Networks".  We adapt
+  the idea to spin-weighted functions by concatenating the magnitude of all
+  spins to the value at spin == 0, then projecting it back to the input number
+  of channels.
+
+  Attributes:
+    spins: (n_spins,) Sequence of int containing the input spins.
+  """
+
+  spins: Sequence[int]
+
+  @nn.compact
+  def __call__(self, inputs):
+    """Applies the nonlinearity.
+
+    Args:
+      inputs: (batch_size, resolution, resolution, num_spins, num_channels)
+        complex64 feature array.
+
+    Returns:
+      An array with the same shape as `inputs`, where only the dimension
+        corresponding to spin zero changes.
+    """
+    idx_zero, _ = get_zero_nonzero_idx(self.spins)
+    abs_inputs = einshape.einshape("bxysc->bxy1(sc)", jnp.abs(inputs))
+    num_channels = inputs.shape[-1]
+    dense_options = dict(
+        features=num_channels, dtype=jnp.complex64, param_dtype=jnp.complex64
+    )
+
+    # We avoid a slow concatenation here by applying two dense layers.
+    outputs_spin0 = (
+        nn.Dense(**dense_options)(inputs[Ellipsis, [idx_zero], :])
+        + nn.Dense(**dense_options)(abs_inputs)
+    ) * 0.5
+
+    return inputs.at[Ellipsis, [idx_zero], :].set(outputs_spin0)
 
 
 class SphericalPooling(nn.Module):
@@ -603,13 +662,13 @@ class SpinSphericalBatchNormalization(nn.Module):
     return outputs
 
 
-class SpinSphericalBatchNormMagnitudeNonlin(nn.Module):
-  """Combine batch normalization and nonlinarity for spin-spherical functions.
+class BatchNormAndActivation(nn.Module, metaclass=abc.ABCMeta):
+  """Abstract class for combining batch normalization and nonlinarity.
 
-
-  This layer is equivalent to running SpinSphericalBatchNormalization followed
-  by MagnitudeNonlinearityLeakyRelu, but is faster because it splits the
-  computation for spin zero and spin nonzero only once.
+  Subclasses of this class serve as `after_conv_module` in
+  `models.SpinSphericalBlock`. The idea is that the combined
+  implementation can be faster when BN and activations have different
+  behaviors for spin zero and nonzero.
 
   Attributes:
     spins: (n_spins,) Sequence of int containing the input spins.
@@ -620,8 +679,8 @@ class SpinSphericalBatchNormMagnitudeNonlin(nn.Module):
     epsilon: a small float added to variance to avoid dividing by zero.
     axis_name: the axis name used to combine batch statistics from multiple
       devices. See `jax.pmap` for a description of axis names (default: None).
-    bias_initializer: initializer for MagnitudeNonlinearity bias, by default,
-      zero.
+    bias_initializer: initializer for activation bias (if any).
+    transformer: SpinSphericalFourierTransformer instance.
   """
   spins: Sequence[int]
   use_running_stats: Optional[bool] = None
@@ -629,6 +688,32 @@ class SpinSphericalBatchNormMagnitudeNonlin(nn.Module):
   epsilon: float = 1e-5
   axis_name: Optional[str] = None
   bias_initializer: Initializer = nn.initializers.zeros
+  transformer: FourierTransformer = DEFAULT_TRANSFORMER
+
+  @abc.abstractmethod
+  def __call__(self,
+               inputs,
+               use_running_stats = None,
+               weights = None):
+    """Applies batch norm and activation.
+
+    Args:
+      inputs: An array of dimensions (batch_size, height, width,
+        num_spins_in, num_channels_in).
+      use_running_stats: if true, the statistics stored in batch_stats will be
+        used instead of computing the batch statistics on the input.
+      weights: An array of dimensions (batch_size,) assigning weights for each
+        batch element. Useful for masking.
+
+    Returns:
+      Normalized inputs (the same shape as inputs).
+    """
+
+    raise NotImplementedError()
+
+
+class SpinSphericalBatchNormMagnitudeNonlin(BatchNormAndActivation):
+  """Applies spin batch normalization and magnitude nonlinarity."""
 
   @nn.compact
   def __call__(self,
@@ -663,3 +748,179 @@ class SpinSphericalBatchNormMagnitudeNonlin(nn.Module):
       outputs.append(outputs_spin)
 
     return jnp.concatenate(outputs, axis=-2)
+
+
+class SpinSphericalBatchNormPhaseCollapse(BatchNormAndActivation):
+  """Applies spin batch normalization and phase collapse."""
+
+  @nn.compact
+  def __call__(
+      self,
+      inputs,
+      use_running_stats = None,
+      weights = None,
+  ):
+    """Calls appropriate batch normalization and nonlinearity per spin."""
+    use_running_stats = nn.module.merge_param(
+        "use_running_stats", self.use_running_stats, use_running_stats
+    )
+
+    options = dict(
+        use_running_stats=use_running_stats,
+        momentum=self.momentum,
+        epsilon=self.epsilon,
+        axis_name=self.axis_name,
+    )
+
+    idx_zero, idx_nonzero = get_zero_nonzero_idx(self.spins)
+    outputs = inputs
+    outputs = outputs.at[Ellipsis, [idx_zero], :].set(
+        SphericalBatchNormalization(use_bias=True, centered=True, **options)(
+            outputs[Ellipsis, [idx_zero], :], weights=weights
+        )
+    )
+    outputs = outputs.at[Ellipsis, idx_nonzero, :].set(
+        SphericalBatchNormalization(use_bias=False, centered=False, **options)(
+            outputs[Ellipsis, idx_nonzero, :], weights=weights
+        )
+    )
+
+    return PhaseCollapseNonlinearity(spins=self.spins)(outputs)
+
+
+class SpinSphericalSpectralBatchNormalization(SpinSphericalBatchNormalization):
+  """Batch normalization applied on the spectral domain.
+
+  Means and variances can be computed directly from the Fourier coefficients, so
+  the batch norm can be applied on the spectral domain, which is faster and more
+  accurate.
+
+  This module should match `layers.SpinSphericalBatchNormalization` exactly for
+  bandlimited inputs with zero mean. There will be a slight difference in case
+  of nonzero means because the spatial version use E[xx*] as the variance
+  instead of E[xx*] - E[x]E[x*].
+  """
+
+  @nn.compact
+  def __call__(
+      self,
+      inputs,
+      use_running_stats = None,
+      weights = None,
+  ):
+    """Normalizes the input using batch (optional) means and variances.
+
+    Stats are computed over the batch and spherical dimensions: (0, 1, 2).
+
+    Args:
+      inputs: An array of dimensions (batch_size, ell_max+1, 2*ell_max+1,
+        num_spins_in, num_channels_in).
+      use_running_stats: if true, the statistics stored in batch_stats will be
+        used instead of computing the batch statistics on the input.
+      weights: An array of dimensions (batch_size,) assigning weights for each
+        batch element. Useful for masking.
+
+    Returns:
+      Normalized inputs (the same shape as inputs).
+    """
+    use_running_stats = nn.module.merge_param(
+        "use_running_stats", self.use_running_stats, use_running_stats
+    )
+
+    # Normalization is independent per spin per channel.
+    num_spins, num_channels = inputs.shape[-2:]
+    feature_shape = (1, 1, 1, num_spins, num_channels)
+    reduced_feature_shape = (num_spins, num_channels)
+
+    initializing = not self.has_variable("batch_stats", "variance")
+
+    running_variance = self.variable(
+        "batch_stats",
+        "variance",
+        lambda s: jnp.ones(s, jnp.float32),
+        reduced_feature_shape,
+    )
+
+    running_mean = self.variable(
+        "batch_stats",
+        "mean",
+        lambda s: jnp.zeros(s, jnp.complex64),
+        reduced_feature_shape,
+    )
+
+    if use_running_stats:
+      variance = running_variance.value
+      mean = running_mean.value
+    else:
+      # Mean is just the coefficients at ell=0.
+      mean = jnp.average(inputs[:, 0], axis=0, weights=weights)
+
+      # Variance is the norm of the ell > 0 coefficients.
+      variance = jnp.sum(
+          inputs[:, 1:] * inputs[:, 1:].conj(), axis=(1, 2)
+      ).real / (4 * np.pi)
+      variance = jnp.average(variance, axis=0, weights=weights)
+
+      # Aggregate means over devices.
+      if self.axis_name is not None and not initializing:
+        mean = lax.pmean(mean, axis_name=self.axis_name)
+        variance = lax.pmean(variance, axis_name=self.axis_name)
+
+      if not initializing:
+        running_variance.value = (
+            self.momentum * running_variance.value
+            + (1 - self.momentum) * variance
+        )
+        running_mean.value = (
+            self.momentum * running_mean.value + (1 - self.momentum) * mean
+        )
+
+    outputs = inputs.at[:, 0].add(-mean)
+    factor = lax.rsqrt(variance.reshape(feature_shape) + self.epsilon)
+    scale = self.param("scale", self.scale_init, reduced_feature_shape).reshape(
+        feature_shape
+    )
+    outputs = outputs * factor * scale
+
+    bias = self.param("bias", self.bias_init, (1, num_channels))
+    ell_max = outputs.shape[1] - 1
+
+    idx_zero, _ = get_zero_nonzero_idx(self.spins)
+    outputs = outputs.at[:, 0, ell_max, idx_zero].add(bias)
+
+    return outputs
+
+
+class SpinSphericalSpectralBatchNormPhaseCollapse(BatchNormAndActivation):
+  """Applies spectral batch normalization and phase collapse."""
+
+  @nn.compact
+  def __call__(
+      self,
+      inputs,
+      use_running_stats = None,
+      weights = None,
+  ):
+    """Takes spectral inputs and produces spatial outputs."""
+    use_running_stats = nn.module.merge_param(
+        "use_running_stats", self.use_running_stats, use_running_stats
+    )
+
+    # Apply spectral BN.
+    feature_maps = SpinSphericalSpectralBatchNormalization(
+        spins=self.spins,
+        use_running_stats=use_running_stats,
+        axis_name=self.axis_name,
+        momentum=self.momentum,
+        epsilon=self.epsilon,
+        name="spectral_batch_norm")(inputs, weights=weights)
+
+    # To spatial domain.
+    batched_backward_transform = jax.vmap(
+        self.transformer.swsft_backward_spins_channels, in_axes=(0, None))
+    feature_maps = batched_backward_transform(
+        feature_maps, self.spins)
+
+    # Apply nonlinearity.
+    return PhaseCollapseNonlinearity(
+        spins=self.spins)(feature_maps)
