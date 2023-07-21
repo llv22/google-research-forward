@@ -5,6 +5,30 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python: seq2act_train_eval",
+            "type": "python",
+            "request": "launch",
+            "program": "seq2act/bin/seq2act_train_eval.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--exp_mode",
+                "train",
+                "--experiment_dir",
+                "${FLAGS_experiment_dir}",
+                "--hparam_file",
+                "${FLAGS_hparam_file}",
+                "--train_steps",
+                "${train_steps}",
+                "--train_file_list",
+                "${train_file_list}",
+                "--train_batch_sizes",
+                "${train_batch_sizes}",
+                "--train_source_list",
+                "${train_source_list}",
+            ]
+        },
+        {
             "name": "Python: Current File",
             "type": "python",
             "request": "launch",
