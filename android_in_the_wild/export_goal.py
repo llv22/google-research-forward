@@ -15,6 +15,7 @@
 
 import logging
 import datetime
+import traceback
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +27,17 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+def global_exception_handler(type, value, error_traceback):
+    """
+    refer to https://stackoverflow.com/questions/7075200/converting-exception-to-a-string-in-python-3
+    """
+    logger.exception(f"Uncaught exception {str(value)}")
+    logger.error(str(type))
+    logger.error(f"\n\t{''.join(traceback.format_tb(error_traceback))}")
+    sys.exit()
+
+sys.excepthook = global_exception_handler
 
 import sys
 sys.path.append('.')
