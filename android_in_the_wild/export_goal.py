@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
+sys.path.append('.')
+sys.path.append('..')
 import logging
 import datetime
 import traceback
@@ -39,9 +42,6 @@ def global_exception_handler(type, value, error_traceback):
 
 sys.excepthook = global_exception_handler
 
-import sys
-sys.path.append('.')
-sys.path.append('..')
 import json
 
 # %%
