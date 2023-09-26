@@ -158,7 +158,8 @@ def export_goal_for_datasets(dataset, dataset_name='google_apps'):
         json.dump(episode_id_to_goal, f)
 
 # see: google_apps has been done
-for dataset_name in  ["general", "install", "single", "web_shopping"]:
+# for dataset_name in  ["general", "install", "single", "web_shopping"]:
+for dataset_name in  ["google_apps"]:
   start = datetime.datetime.now()
   filenames = tf.io.gfile.glob(dataset_directories[dataset_name])
   raw_dataset = tf.data.TFRecordDataset(filenames, compression_type='GZIP').as_numpy_iterator()
