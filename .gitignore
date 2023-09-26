@@ -29,3 +29,4 @@ ccg3-transformer-6-dot_product_attention-lr_0.003_rd_0.1_ad_0.1_pd_0.2.tar.gz
 ccg3-transformer-6-dot_product_attention-lr_0.003_rd_0.1_ad_0.1_pd_0.2/
 ugif-dataset
 ugif-dataset.tar.gz
+.gradle/
