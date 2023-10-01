@@ -1,0 +1,5 @@
+android_in_the_wild/instructions/general.txt filter=lfs diff=lfs merge=lfs -text
+android_in_the_wild/instructions/google_apps.txt filter=lfs diff=lfs merge=lfs -text
+android_in_the_wild/instructions/install.txt filter=lfs diff=lfs merge=lfs -text
+android_in_the_wild/instructions/single.txt filter=lfs diff=lfs merge=lfs -text
+android_in_the_wild/instructions/web_shopping.txt filter=lfs diff=lfs merge=lfs -text
